@@ -6,19 +6,51 @@ Install: pip install stable-baselines3[extra]
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import VecNormalize
 from robot_env import RobotArmGraspEnv
 
 
-def train_robot_arm():
-    """Train the robot arm using PPO algorithm"""
+class RenderCallback(BaseCallback):
+    """
+    Callback for rendering the environment during training
+    """
+    def __init__(self, render_freq=1, verbose=0):
+        super().__init__(verbose)
+        self.render_freq = render_freq
+        
+    def _on_step(self) -> bool:
+        # Render every render_freq steps
+        if self.n_calls % self.render_freq == 0:
+            # Get the first environment from the vectorized wrapper
+            env = self.training_env.envs[0]
+            # Call render on the actual environment
+            env.render()
+        return True
+
+
+def train_robot_arm(visualize=False):
+    """Train the robot arm using PPO algorithm
     
-    # Create vectorized environment (parallel training)
-    env = make_vec_env(
-        lambda: RobotArmGraspEnv(render_mode=None),
-        n_envs=4  # 4 parallel environments
-    )
+    Args:
+        visualize: If True, renders a single environment (slower training)
+                   If False, runs all environments headless (faster training)
+    """
+    
+    if visualize:
+        # OPTION 1: Single environment with visualization (slower but visible)
+        print("Training with visualization (single environment - slower)")
+        env = make_vec_env(
+            lambda: RobotArmGraspEnv(render_mode="human"),
+            n_envs=1  # Just 1 environment to allow rendering
+        )
+    else:
+        # OPTION 2: Multiple environments without rendering (faster)
+        print("Training without visualization (4 parallel environments - faster)")
+        env = make_vec_env(
+            lambda: RobotArmGraspEnv(render_mode=None),
+            n_envs=4  # 4 parallel environments for speed
+        )
     
     # Wrap with VecNormalize for better training stability
     env = VecNormalize(
@@ -29,7 +61,7 @@ def train_robot_arm():
         clip_reward=10.0
     )
     
-    # Create evaluation environment
+    # Create evaluation environment (no rendering during eval)
     eval_env = make_vec_env(
         lambda: RobotArmGraspEnv(render_mode=None),
         n_envs=1
@@ -43,6 +75,13 @@ def train_robot_arm():
     )
     
     # Callbacks
+    callbacks = []
+    
+    # Add render callback if visualizing
+    if visualize:
+        render_callback = RenderCallback(render_freq=1)
+        callbacks.append(render_callback)
+    
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path="./logs/",
@@ -58,6 +97,9 @@ def train_robot_arm():
         save_path="./checkpoints/",
         name_prefix="robot_arm_model"
     )
+    
+    callbacks.append(eval_callback)
+    callbacks.append(checkpoint_callback)
     
     # Initialize PPO agent
     model = PPO(
@@ -76,12 +118,14 @@ def train_robot_arm():
     )
     
     print("Starting training...")
+    if visualize:
+        print("Watch the robot learn in real-time!")
     print("Monitor progress with: tensorboard --logdir ./tensorboard_logs/")
     
     # Train the agent
     model.learn(
         total_timesteps=2_000_000,
-        callback=[eval_callback, checkpoint_callback],
+        callback=callbacks,
         progress_bar=True
     )
     
@@ -152,9 +196,20 @@ if __name__ == "__main__":
         print("Testing trained model...")
         test_trained_model()
     else:
-        # Training mode
-        print("Training robot arm...")
-        model, env = train_robot_arm()
+        # Training mode - ask user if they want visualization
+        print("=" * 60)
+        print("Robot Arm Training")
+        print("=" * 60)
+        print("\nVisualization options:")
+        print("  [1] Train with visualization (1 env, slower, you can watch)")
+        print("  [2] Train without visualization (4 envs, 4x faster)")
+        print()
+        
+        choice = input("Choose option (1 or 2, default=2): ").strip()
+        visualize = (choice == "1")
+        
+        print("\nTraining robot arm...")
+        model, env = train_robot_arm(visualize=visualize)
         
         # Ask if user wants to test
         response = input("\nTraining complete. Test the model? (y/n): ")
