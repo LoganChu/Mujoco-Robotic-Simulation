@@ -84,28 +84,39 @@
               <geom name="link4_geom" type="cylinder" size="0.02 0.03" rgba="0.3 0.3 0.3 1"
                     mass="0.2" contype="1" conaffinity="1"/>
               
-              <!-- Gripper base -->
+              <!-- Gripper base and Option A hinge gripper -->
               <body name="gripper_base" pos="0 0 0.05">
                 <geom name="gripper_base_geom" type="box" size="0.02 0.03 0.01" rgba="0.5 0.5 0.5 1"
                       mass="0.1" contype="1" conaffinity="1"/>
+
                 <site name="gripper_site" pos="0 0 0.04" size="0.01"/>
-                
-                <!-- Left finger -->
-                <body name="left_finger" pos="0 0.025 0.01">
-                  <joint name="left_finger_joint" type="slide" axis="0 -1 0" range="0 0.03" damping="0.2" armature="0.001"/>
-                  <geom name="left_finger_geom" type="box" size="0.008 0.01 0.03" rgba="0.2 0.8 0.2 1"
-                        friction="2.0 0.005 0.0001" mass="0.02" contype="1" conaffinity="1"/>
-                  <geom name="left_finger_tip" type="box" size="0.01 0.005 0.01" pos="0 -0.015 0.02" rgba="0.2 0.8 0.2 1"
-                        friction="2.0 0.005 0.0001" contype="1" conaffinity="1"/>
+
+                <!-- Left finger (hinge) -->
+                <body name="left_finger" pos="0 0.03 0.01">
+                  <!-- hinge axis points so closing rotates inward toward -y -->
+                  <joint name="left_finger_hinge" type="hinge" axis="0 0 1" range="-1.57 0" damping="0.5" armature="0.001"/>
+                  <!-- finger link -->
+                  <geom name="left_finger_link" type="capsule" fromto="0 0 0 0 -0.04 0" size="0.01"
+                        rgba="0.2 0.8 0.2 1" contype="1" conaffinity="1" mass="0.02"
+                        friction="2.5 0.005 0.0001" solimp="0.99 0.99 0.001" solref="0.01 1"/>
+                  <!-- rounded fingertip pad -->
+                  <geom name="left_finger_pad" type="sphere" pos="0 -0.045 0" size="0.012"
+                        rgba="0.15 0.6 0.15 1" contype="1" conaffinity="1" mass="0.002"
+                        friction="4 0.005 0.0001" solimp="0.99 0.999 0.001" solref="0.005 1"/>
+                  <site name="left_tip_site" pos="0 -0.045 0" size="0.005"/>
                 </body>
-                
-                <!-- Right finger -->
-                <body name="right_finger" pos="0 -0.025 0.01">
-                  <joint name="right_finger_joint" type="slide" axis="0 1 0" range="0 0.03" damping="0.2" armature="0.001"/>
-                  <geom name="right_finger_geom" type="box" size="0.008 0.01 0.03" rgba="0.2 0.8 0.2 1"
-                        friction="2.0 0.005 0.0001" mass="0.02" contype="1" conaffinity="1"/>
-                  <geom name="right_finger_tip" type="box" size="0.01 0.005 0.01" pos="0 0.015 0.02" rgba="0.2 0.8 0.2 1"
-                        friction="2.0 0.005 0.0001" contype="1" conaffinity="1"/>
+
+                <!-- Right finger (hinge) -->
+                <body name="right_finger" pos="0 -0.03 0.01">
+                  <!-- hinge mirrored; closing rotates inward toward +y -->
+                  <joint name="right_finger_hinge" type="hinge" axis="0 0 1" range="0 1.57" damping="0.5" armature="0.001"/>
+                  <geom name="right_finger_link" type="capsule" fromto="0 0 0 0 0.04 0" size="0.01"
+                        rgba="0.2 0.8 0.2 1" contype="1" conaffinity="1" mass="0.02"
+                        friction="2.5 0.005 0.0001" solimp="0.99 0.99 0.001" solref="0.01 1"/>
+                  <geom name="right_finger_pad" type="sphere" pos="0 0.045 0" size="0.012"
+                        rgba="0.15 0.6 0.15 1" contype="1" conaffinity="1" mass="0.002"
+                        friction="4 0.005 0.0001" solimp="0.99 0.999 0.001" solref="0.005 1"/>
+                  <site name="right_tip_site" pos="0 0.045 0" size="0.005"/>
                 </body>
               </body>
             </body>
@@ -120,8 +131,9 @@
     <motor name="shoulder_lift_motor" joint="shoulder_lift" gear="50" ctrllimited="true" ctrlrange="-1 1"/>
     <motor name="elbow_motor" joint="elbow" gear="30" ctrllimited="true" ctrlrange="-1 1"/>
     <motor name="wrist_motor" joint="wrist" gear="20" ctrllimited="true" ctrlrange="-1 1"/>
-    <motor name="left_finger_motor" joint="left_finger_joint" gear="15" ctrllimited="true" ctrlrange="-1 1"/>
-    <motor name="right_finger_motor" joint="right_finger_joint" gear="15" ctrllimited="true" ctrlrange="-1 1"/>
+    <!-- Gripper actuators: hinge motors for Option A -->
+    <motor name="left_finger_motor" joint="left_finger_hinge" gear="40" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="right_finger_motor" joint="right_finger_hinge" gear="40" ctrllimited="true" ctrlrange="-1 1"/>
   </actuator>
   
   <sensor>
@@ -133,10 +145,13 @@
     <jointvel name="elbow_vel" joint="elbow"/>
     <jointpos name="wrist_pos" joint="wrist"/>
     <jointvel name="wrist_vel" joint="wrist"/>
-    <jointpos name="left_finger_pos" joint="left_finger_joint"/>
-    <jointvel name="left_finger_vel" joint="left_finger_joint"/>
-    <jointpos name="right_finger_pos" joint="right_finger_joint"/>
-    <jointvel name="right_finger_vel" joint="right_finger_joint"/>
+
+    <!-- sensors for new gripper joints -->
+    <jointpos name="left_finger_pos" joint="left_finger_hinge"/>
+    <jointvel name="left_finger_vel" joint="left_finger_hinge"/>
+    <jointpos name="right_finger_pos" joint="right_finger_hinge"/>
+    <jointvel name="right_finger_vel" joint="right_finger_hinge"/>
+
     <framepos name="gripper_pos" objtype="site" objname="gripper_site"/>
     <framequat name="gripper_quat" objtype="site" objname="gripper_site"/>
     <framepos name="cube_pos" objtype="site" objname="cube_center"/>
@@ -157,7 +172,7 @@
   </contact>
   
   <equality>
-    <!-- Optional: Make gripper fingers mirror each other -->
-    <!-- <joint joint1="left_finger_joint" joint2="right_finger_joint" polycoef="0 1 0 0 0"/> -->
+    <!-- Mirror the two gripper hinges so they move symmetrically (left + right = 0) -->
+    <joint joint1="left_finger_hinge" joint2="right_finger_hinge" polycoef="0 1 1 0 0"/>
   </equality>
 </mujoco>
