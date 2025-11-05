@@ -23,7 +23,9 @@ class PandaPickEnv(gym.Env):
         # Get important indices
         self.block_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "block")
         self.goal_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "goal")
-        self.gripper_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "block_site")
+        self.left_gripper_id = mujoco.mj_name2id(self.model,  mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        self.right_gripper_id = mujoco.mj_name2id(self.model,  mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+
         
         # Action space: 7 joint velocities + 1 gripper
         self.action_space = spaces.Box(low=-1, high=1, shape=(8,), dtype=np.float32)
@@ -34,7 +36,7 @@ class PandaPickEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(26,), dtype=np.float32
         )
         
-        self.max_steps = 1000
+        self.max_steps = 2500
         self.current_step = 0
         
     def reset(self, seed=None, options=None):
@@ -92,13 +94,13 @@ class PandaPickEnv(gym.Env):
     def step(self, action):
         # Scale actions
         # Joint velocities (first 7 actions)
-        joint_actions = action[:7] * 0.5
+        joint_actions = action[:7] 
 
         # Gripper action (last action) - scale to gripper range
         gripper_action = (action[7] + 1) * 127.5  # Scale from [-1,1] to [0,255]
         
         # Apply actions
-        self.data.ctrl[:7] = self.data.qpos[:7] + joint_actions * self.model.opt.timestep * 10
+        self.data.ctrl[:7] = self.data.qpos[:7] + joint_actions * self.model.opt.timestep * 50
         self.data.ctrl[7] = gripper_action
         
         # Step simulation
@@ -109,7 +111,6 @@ class PandaPickEnv(gym.Env):
             self.step_count += 1
             if self.step_count % self.render_every_n_steps == 0:
                 self.render()
-                print(action)
         
         # Get observation
         obs = self._get_obs()
@@ -124,38 +125,79 @@ class PandaPickEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     
     def _compute_reward(self):
-        gripper_pos = self.data.xpos[self.model.nbody - 1][:3]
+        
+        gripper_pos = (self.data.xpos[self.left_gripper_id][:3] + self.data.xpos[self.right_gripper_id][:3])/2
         block_pos = self.data.xpos[self.block_body_id][:3]
         goal_pos = self.data.site_xpos[self.goal_site_id][:3]
         
         # Distance from gripper to block
         d_gripper_block = np.linalg.norm(gripper_pos - block_pos)
-        
+
         # Distance from block to goal
         d_block_goal = np.linalg.norm(block_pos - goal_pos)
+
+        # If you have block_size stored, use it. Otherwise estimate from geom
+        block_size = 0.025
         
-        # Reward components
-        reach_reward = -d_gripper_block
-        lift_reward = block_pos[2] - 0.025  # Reward for lifting block off ground
-        goal_reward = -d_block_goal
+        # Calculate required gripper opening based on block size
+        required_opening = block_size * 1.2  # 20% margin for alignment
+        required_ctrl = (required_opening / 0.04) * 255  # Convert to control value
         
         # Check if gripper is closed around block
-        gripper_ctrl = self.data.ctrl[7]
+        gripper_ctrl = self.data.ctrl[7]  # Range: [0, 255], 0=closed, 255=open
+        
+        # Gripper should be: close enough to block AND closed enough for this block size
+        is_grasped = (d_gripper_block < 0.05 and 
+                    gripper_ctrl < required_ctrl * 1.5)  # Allow some tolerance
+        
+        # Phase-based rewards: reach -> grasp -> lift -> place
+        reach_reward = 0
         grasp_reward = 0
-        if d_gripper_block < 0.05 and gripper_ctrl < 100:  # Close to block and gripper closed
-            grasp_reward = 1.0
+        lift_reward = 0
+        goal_reward = 0
+        
+        if not is_grasped:
+            # Phase 1: Reach for the block
+            reach_reward = -d_gripper_block * 3.0
+            
+            # Encourage closing gripper when near block
+            if d_gripper_block < 0.05:
+                # Reward for closing gripper to appropriate size for this object
+                # Optimal control is around required_ctrl
+                if gripper_ctrl > required_ctrl * 1.5:
+                    # Too open - encourage closing
+                    grasp_reward = -3.0 * (gripper_ctrl*1.5-required_ctrl)/255.0
+                elif gripper_ctrl < required_ctrl * 0.5:
+                    # Too closed - encourage opening
+                    grasp_reward = 3.0 * (required_ctrl*1.5 - gripper_ctrl)/255.0
+                else:
+                    # Good gripper position
+                    grasp_reward = 2.0
+        else:
+            # Phase 2: Block is grasped
+            grasp_reward = 5.0  # Continuous bonus for maintaining grasp
+            
+            # Phase 3: Lift the block
+            block_height = block_pos[2]
+            lift_reward = (block_height - 0.025) * 3.0  # Reward for lifting off ground
+            
+            # Phase 4: Move to goal (only when grasped)
+            goal_reward = -d_block_goal * 5.0
         
         # Success condition: block near goal
         success = d_block_goal < 0.05
-        success_reward = 10.0 if success else 0.0
+        success_reward = 20.0 if success else 0.0
         
-        reward = reach_reward + 2.0 * lift_reward + 3.0 * goal_reward + grasp_reward + success_reward
+        # Total reward
+        reward = reach_reward + grasp_reward + lift_reward + goal_reward + success_reward
+        print("Overall Reward: ", reward)
         
         info = {
             'success': success,
             'd_gripper_block': d_gripper_block,
             'd_block_goal': d_block_goal,
-            'block_height': block_pos[2]
+            'block_height': block_pos[2],
+            'is_grasped': is_grasped
         }
         
         return reward, info
@@ -174,7 +216,7 @@ class PandaPickEnv(gym.Env):
             self.viewer.close()
 
 
-def train_panda(visualize=False, render_every_n_steps=10, continue_from=None):
+def train_panda(visualize=False, render_every_n_steps=10, continue_from=True):
     """Train the Panda arm using SAC algorithm
     
     Args:
@@ -192,7 +234,7 @@ def train_panda(visualize=False, render_every_n_steps=10, continue_from=None):
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=10000,
+        save_freq=50000,
         save_path='./panda_models/',
         name_prefix='panda_sac'
     )
@@ -200,7 +242,7 @@ def train_panda(visualize=False, render_every_n_steps=10, continue_from=None):
     # Create SAC model
     if continue_from:
         print(f"Loading model from {continue_from}...")
-        model = SAC.load(continue_from, env=env)
+        model = SAC.load("panda_sac_final.zip", env=env)
         print("Continuing training from saved model...")
     else:
         # Create SAC model from scratch
@@ -222,7 +264,7 @@ def train_panda(visualize=False, render_every_n_steps=10, continue_from=None):
     
     # Train the model
     model.learn(
-        total_timesteps=100000,
+        total_timesteps=50000,
         callback=checkpoint_callback,
         progress_bar=True
     )
