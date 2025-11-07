@@ -201,7 +201,7 @@ class PandaPickEnv(gym.Env):
         }
         
         return reward, info
-    
+
     def render(self):
         if self.render_mode == "human":
             if self.viewer is None:
