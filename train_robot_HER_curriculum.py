@@ -8,8 +8,36 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.her import HerReplayBuffer
 import os
+import torch
 
-class PandaPickEnvGoalConditioned(gym.GoalEnv):
+# Check GPU availability
+if not torch.cuda.is_available():
+    print("=" * 70)
+    print("WARNING: GPU (CUDA) not available! Training will be MUCH slower.")
+    print("=" * 70)
+    USE_GPU = False
+    device = "cpu"
+else:
+    USE_GPU = True
+    device = "cuda"
+    
+    # GPU Optimization: Enable TF32 for Ampere+ GPUs 
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # GPU Optimization: cuDNN benchmarking for optimal algorithms
+    torch.backends.cudnn.benchmark = True
+    
+    # Detect GPU capabilities
+    gpu_props = torch.cuda.get_device_properties(0)
+    gpu_name = torch.cuda.get_device_name(0)
+    gpu_memory_gb = gpu_props.total_memory / 1e9
+    gpu_compute_capability = f"{gpu_props.major}.{gpu_props.minor}"
+    
+    # Check for Tensor Cores (TF32 support) - Ampere+ has compute capability 8.0+
+    has_tensor_cores = gpu_props.major >= 8
+    
+class PandaPickEnvGoalConditioned(gym.Env):
     """
     Goal-conditioned version of Panda environment for HER.
     Now learns to reach ANY goal, not just a fixed one!
@@ -46,7 +74,7 @@ class PandaPickEnvGoalConditioned(gym.GoalEnv):
             'desired_goal': spaces.Box(-np.inf, np.inf, shape=(self.goal_dim,), dtype=np.float32),
         })
         
-        self.max_steps = 50  # Shorter episodes for faster learning
+        self.max_steps = 500
         self.current_step = 0
         self.block_size = 0.025
         
@@ -184,17 +212,16 @@ class PandaPickEnvGoalConditioned(gym.GoalEnv):
         
         # Orientation similarity (dot product)
         orient_similarity = np.sum(achieved_orient * desired_orient, axis=-1)
-        orient_dist = 1 - orient_similarity
         
         # Curriculum-based reward weighting
         if self.curriculum_stage == 1:
             # Stage 1: Only care about position
-            reward = -(pos_dist > 0.1).astype(np.float32)  # Binary: -1 or 0
+            reward = -pos_dist
             
         elif self.curriculum_stage == 2:
             # Stage 2: Position + loose orientation
             success = (pos_dist < 0.05) & (orient_similarity > 0.7)
-            reward = -(~success).astype(np.float32)  # Binary: -1 or 0
+            reward = orient_similarity - pos_dist  # Encourage both
             
         else:  # Stage 3
             # Stage 3: Strict requirements
@@ -328,12 +355,11 @@ def train_with_her_and_curriculum(visualize=False, total_timesteps=500000):
         replay_buffer_kwargs=dict(
             n_sampled_goal=4,  # Number of HER goals per transition
             goal_selection_strategy='future',  # Use "future" strategy
-            online_sampling=True,  # Sample HER goals online
-            max_episode_length=50,  # Match env max_steps
         ),
         verbose=1,
         learning_rate=1e-3,
         buffer_size=1000000,
+        learning_starts=1000, 
         batch_size=256,
         tau=0.005,
         gamma=0.98,
@@ -372,7 +398,7 @@ def test_her_model(model_path="panda_her_curriculum_final.zip", num_episodes=10)
         curriculum_stage=3  # Test on hardest stage
     )
     
-    model = SAC.load(model_path)
+    model = SAC.load(model_path, env=env)
     
     successes = 0
     
@@ -383,7 +409,7 @@ def test_her_model(model_path="panda_her_curriculum_final.zip", num_episodes=10)
         print(f"\nEpisode {episode + 1}")
         print(f"Desired goal: {obs['desired_goal']}")
         
-        for step in range(50):
+        for step in range(3000):
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             episode_reward += reward
