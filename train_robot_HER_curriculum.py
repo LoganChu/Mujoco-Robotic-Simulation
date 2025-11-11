@@ -212,21 +212,19 @@ class PandaPickEnvGoalConditioned(gym.Env):
         
         # Orientation similarity (dot product)
         orient_similarity = np.sum(achieved_orient * desired_orient, axis=-1)
-        
-        # Curriculum-based reward weighting
+            
+        # Single reward function, curriculum adjusts weights
+        pos_reward = -pos_dist * 10.0
+        orient_reward = (orient_similarity - 0.7) * 10.0
+
+        # Curriculum controls weighting, not the reward structure
         if self.curriculum_stage == 1:
-            # Stage 1: Only care about position
-            reward = -pos_dist
-            
+            reward = pos_reward + orient_reward * 0.1  # Mostly position
         elif self.curriculum_stage == 2:
-            # Stage 2: Position + loose orientation
-            success = (pos_dist < 0.05) & (orient_similarity > 0.7)
-            reward = orient_similarity - pos_dist  # Encourage both
-            
+            reward = pos_reward + orient_reward * 0.5  # Balanced
         else:  # Stage 3
-            # Stage 3: Strict requirements
-            success = (pos_dist < 0.05) & (orient_similarity > 0.9)
-            reward = -(~success).astype(np.float32)  # Binary: -1 or 0
+            reward = pos_reward + orient_reward * 1.0  # Full orientation weight
+
         
         return reward
     
@@ -412,6 +410,7 @@ def test_her_model(model_path="panda_her_curriculum_final.zip", num_episodes=10)
         for step in range(3000):
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
+            print(reward)
             episode_reward += reward
             
             env.render()
