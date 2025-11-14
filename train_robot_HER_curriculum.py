@@ -74,7 +74,7 @@ class PandaPickEnvGoalConditioned(gym.Env):
             'desired_goal': spaces.Box(-np.inf, np.inf, shape=(self.goal_dim,), dtype=np.float32),
         })
         
-        self.max_steps = 500
+        self.max_steps = 10000
         self.current_step = 0
         self.block_size = 0.025
         
@@ -154,6 +154,7 @@ class PandaPickEnvGoalConditioned(gym.Env):
         
         # Achieved goal: where block actually is + gripper orientation
         achieved_goal = np.concatenate([block_pos, gripper_orient]).astype(np.float32)
+        print(achieved_goal)
         
         # Robot state observation
         observation = np.concatenate([
@@ -240,6 +241,7 @@ class PandaPickEnvGoalConditioned(gym.Env):
         
         # Success criteria depends on curriculum stage
         if self.curriculum_stage == 1:
+            print("1")
             is_success = pos_dist < 0.1
         elif self.curriculum_stage == 2:
             is_success = (pos_dist < 0.05) and (orient_similarity > 0.7)
@@ -407,10 +409,9 @@ def test_her_model(model_path="panda_her_curriculum_final.zip", num_episodes=10)
         print(f"\nEpisode {episode + 1}")
         print(f"Desired goal: {obs['desired_goal']}")
         
-        for step in range(3000):
+        for step in range(10000):
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
-            print(reward)
             episode_reward += reward
             
             env.render()
