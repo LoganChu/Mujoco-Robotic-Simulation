@@ -61,8 +61,8 @@ class PandaPickEnvGoalConditioned(gym.Env):
         # Action space: 7 joint velocities + 1 gripper
         self.action_space = spaces.Box(low=-1, high=1, shape=(8,), dtype=np.float32)
         
-        # Goal: [block_x, block_y, block_z, gripper_orient_x, y, z]
-        self.goal_dim = 6
+        # Goal: [block_x, block_y, block_z, gripper_orient_x, y, z, gripper_x, gripper_y, gripper_z]
+        self.goal_dim = 9  # Changed from 6 to 9
         
         # Observation space for GoalEnv
         # observation: robot state
@@ -107,32 +107,36 @@ class PandaPickEnvGoalConditioned(gym.Env):
         """Sample goals based on curriculum difficulty"""
         
         if self.curriculum_stage == 1:
-            # Stage 1: Easy - Just reach block area, any height, any orientation
+            # Stage 1: Just get near the block (any position around it is fine)
             goal_pos = np.array([
-                np.random.uniform(0.35, 0.45),
+                np.random.uniform(0.35, 0.45),  # Block area
                 np.random.uniform(-0.05, 0.05),
-                np.random.uniform(0.025, 0.1)  # Low height OK
+                np.random.uniform(0.025, 0.1)   # Low height OK
             ])
-            # Don't care about orientation in stage 1
+            # Don't care about orientation yet
             goal_orient = np.array([0, 0, -1])  # Placeholder
             
         elif self.curriculum_stage == 2:
-            # Stage 2: Medium - Must lift block, loose orientation
+            # Stage 2: Still near block, but now with orientation requirement
+            # Block should still be on table (not lifted yet)
             goal_pos = np.array([
-                np.random.uniform(0.3, 0.5),
-                np.random.uniform(-0.1, 0.1),
-                np.random.uniform(0.1, 0.2)  # Must lift higher
+                np.random.uniform(0.35, 0.45),
+                np.random.uniform(-0.05, 0.05),
+                np.random.uniform(0.025, 0.08)  # Keep block on table
             ])
-            # Loose orientation requirement
+            # NOW orientation matters - pointing down for grasping
             goal_orient = np.array([0, 0, -1])
             
         else:  # Stage 3
-            # Stage 3: Hard - Full task with strict requirements
+            # Stage 3: Full task - move block to target location
             goal_pos = self.data.site_xpos[self.goal_site_id][:3].copy()
-            # Strict orientation
+            # Maintain correct orientation
             goal_orient = np.array([0, 0, -1])
         
-        return np.concatenate([goal_pos, goal_orient]).astype(np.float32)
+        # Placeholder for desired gripper position (not used directly in reward)
+        goal_gripper_pos = np.array([0, 0, 0])
+        
+        return np.concatenate([goal_pos, goal_orient, goal_gripper_pos]).astype(np.float32)
     
     def _get_obs(self):
         """Get observation in GoalEnv format"""
@@ -152,9 +156,12 @@ class PandaPickEnvGoalConditioned(gym.Env):
         gripper_rot = self.data.xmat[gripper_rot_id].reshape(3, 3)
         gripper_orient = gripper_rot[:, 2]  # Z-axis
         
-        # Achieved goal: where block actually is + gripper orientation
-        achieved_goal = np.concatenate([block_pos, gripper_orient]).astype(np.float32)
-        print(achieved_goal)
+        # Achieved goal: [block_pos(3), gripper_orient(3), gripper_pos(3)]
+        achieved_goal = np.concatenate([
+            block_pos,        # [0:3]
+            gripper_orient,   # [3:6]
+            gripper_pos       # [6:9]
+        ]).astype(np.float32)
         
         # Robot state observation
         observation = np.concatenate([
@@ -201,57 +208,80 @@ class PandaPickEnvGoalConditioned(gym.Env):
         This is called by HER for relabeling!
         
         HER will call this with different desired_goals to relabel experiences.
+        
+        achieved_goal structure: [block_pos(3), gripper_orient(3), gripper_pos(3)]
+        desired_goal structure: [target_block_pos(3), target_orient(3), placeholder_gripper(3)]
         """
-        # Split goals into position and orientation
-        achieved_pos = achieved_goal[..., :3]
-        desired_pos = desired_goal[..., :3]
-        achieved_orient = achieved_goal[..., 3:]
-        desired_orient = desired_goal[..., 3:]
+        # Extract components from achieved_goal
+        achieved_block_pos = achieved_goal[..., :3]
+        achieved_gripper_orient = achieved_goal[..., 3:6]
+        achieved_gripper_pos = achieved_goal[..., 6:9]
         
-        # Position distance
-        pos_dist = np.linalg.norm(achieved_pos - desired_pos, axis=-1)
+        # Extract components from desired_goal
+        desired_block_pos = desired_goal[..., :3]
+        desired_gripper_orient = desired_goal[..., 3:6]
+        # Note: desired_goal[6:9] is placeholder, not used
         
-        # Orientation similarity (dot product)
-        orient_similarity = np.sum(achieved_orient * desired_orient, axis=-1)
-            
-        # Single reward function, curriculum adjusts weights
-        pos_reward = -pos_dist * 10.0
-        orient_reward = (orient_similarity - 0.7) * 10.0
-
-        # Curriculum controls weighting, not the reward structure
+        # COMPONENT 1: Gripper approaching block (critical early in learning!)
+        gripper_to_block_dist = np.linalg.norm(achieved_gripper_pos - achieved_block_pos, axis=-1)
+        approach_reward = -gripper_to_block_dist * 20.0
+        
+        # COMPONENT 2: Block reaching target goal
+        block_to_goal_dist = np.linalg.norm(achieved_block_pos - desired_block_pos, axis=-1)
+        placement_reward = -block_to_goal_dist * 10.0
+        
+        # COMPONENT 3: Orientation alignment
+        orient_similarity = np.sum(achieved_gripper_orient * desired_gripper_orient, axis=-1)
+        orient_reward = (orient_similarity - 0.7) * 5.0
+        
+        # Curriculum-based weighting - FIXED ORDER!
         if self.curriculum_stage == 1:
-            reward = pos_reward + orient_reward * 0.1  # Mostly position
+            # Stage 1: ONLY focus on approaching block
+            # Learn: "Move gripper close to block"
+            reward = approach_reward * 1.0 + placement_reward * 0.0 + orient_reward * 0.0
+            
         elif self.curriculum_stage == 2:
-            reward = pos_reward + orient_reward * 0.5  # Balanced
+            # Stage 2: Approach + Orientation
+            # Learn: "Get close to block WITH correct orientation for grasping"
+            reward = approach_reward * 0.7 + placement_reward * 0.0 + orient_reward * 0.8
+            
         else:  # Stage 3
-            reward = pos_reward + orient_reward * 1.0  # Full orientation weight
-
+            # Stage 3: All components - full task
+            # Learn: "Grasp block with correct orientation AND move it to target"
+            reward = approach_reward * 0.3 + placement_reward * 1.0 + orient_reward * 0.8
         
         return reward
     
     def _get_info(self, achieved_goal, desired_goal):
         """Check if goal is achieved"""
-        achieved_pos = achieved_goal[:3]
+        achieved_pos = achieved_goal[:3]  # Block position
         desired_pos = desired_goal[:3]
-        achieved_orient = achieved_goal[3:]
-        desired_orient = desired_goal[3:]
+        achieved_orient = achieved_goal[3:6]  # Gripper orientation
+        desired_orient = desired_goal[3:6]
+        achieved_gripper_pos = achieved_goal[6:9]  # Gripper position
         
         pos_dist = np.linalg.norm(achieved_pos - desired_pos)
         orient_similarity = np.dot(achieved_orient, desired_orient)
+        gripper_to_block = np.linalg.norm(achieved_gripper_pos - achieved_pos)
         
-        # Success criteria depends on curriculum stage
+        # Success criteria follows curriculum progression
         if self.curriculum_stage == 1:
-            print("1")
-            is_success = pos_dist < 0.1
+            # Stage 1: Success = gripper is close to block (within 5cm)
+            is_success = gripper_to_block < 0.05
+            
         elif self.curriculum_stage == 2:
-            is_success = (pos_dist < 0.05) and (orient_similarity > 0.7)
-        else:
-            is_success = (pos_dist < 0.05) and (orient_similarity > 0.9)
+            # Stage 2: Success = gripper close to block WITH correct orientation
+            is_success = (gripper_to_block < 0.05) and (orient_similarity > 0.85)
+            
+        else:  # Stage 3
+            # Stage 3: Success = block moved to target location with orientation
+            is_success = (pos_dist < 0.05) and (orient_similarity > 0.85)
         
         return {
             'is_success': is_success,
             'pos_dist': pos_dist,
-            'orient_similarity': orient_similarity
+            'orient_similarity': orient_similarity,
+            'gripper_to_block': gripper_to_block
         }
     
     def render(self):
@@ -324,9 +354,9 @@ def train_with_her_and_curriculum(visualize=False, total_timesteps=500000):
     print("="*60)
     print("Training with HER + Curriculum Learning")
     print("="*60)
-    print("\nStage 1: Learn to reach block area (easy)")
-    print("Stage 2: Learn to lift block with loose orientation")
-    print("Stage 3: Full task with precise placement\n")
+    print("\nStage 1: Learn to approach block (position only)")
+    print("Stage 2: Learn to approach with correct orientation (ready to grasp)")
+    print("Stage 3: Full task - grasp and move to target\n")
     
     # Create goal-conditioned environment
     render_mode = "human" if visualize else None
@@ -423,6 +453,7 @@ def test_her_model(model_path="panda_her_curriculum_final.zip", num_episodes=10)
                 print(f"Success: {success}, Reward: {episode_reward:.2f}")
                 print(f"Position error: {info['pos_dist']:.4f}m")
                 print(f"Orientation similarity: {info['orient_similarity']:.4f}")
+                print(f"Gripper to block: {info['gripper_to_block']:.4f}m")
                 break
     
     print(f"\n{'='*60}")
@@ -460,10 +491,10 @@ if __name__ == "__main__":
         test_her_model()
 
 
-# Expected training timeline:
-# Episodes 0-2000: Stage 1 (reach block area) - Success rate: 0% → 85%
-# Episodes 2000-8000: Stage 2 (lift + loose orientation) - Success rate: 30% → 80%
-# Episodes 8000+: Stage 3 (precise placement) - Success rate: 40% → 75%+
+# Expected training timeline with improved curriculum:
+# Episodes 0-2000: Stage 1 (approach block) - Success rate: 0% → 85%
+# Episodes 2000-6000: Stage 2 (approach + orient) - Success rate: 20% → 80%
+# Episodes 6000+: Stage 3 (grasp and place) - Success rate: 30% → 70%+
 #
 # Total training time: ~2-4 hours on CPU, ~30-60 min on GPU
-# Final success rate on full task: 70-80% (without any demonstrations!)
+# Final success rate on full task: 65-75% (without any demonstrations!)
